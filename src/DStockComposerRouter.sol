@@ -227,6 +227,16 @@ contract DStockComposerRouter is
         bytes composeMsg2;
     }
 
+    struct UserWrapBridgeParams {
+        uint32 dstEid;
+        bytes32 to;
+        bytes extraOptions;
+        uint256 minAmountLD;
+        bytes composeMsg;
+        uint256 availableFee;
+        address refundTo;
+    }
+
     /// @custom:oz-upgrades-unsafe-allow constructor
     constructor() {
         _disableInitializers();
@@ -297,48 +307,19 @@ contract DStockComposerRouter is
     ) external payable nonReentrant returns (uint256 amountSentLD) {
         if (amount == 0) revert AmountZero();
         if (to == bytes32(0)) revert InvalidRecipient();
-
-        address wrapper = underlyingToWrapper[underlying];
-        address shareAdapter = underlyingToShareAdapter[underlying];
-        if (wrapper == address(0) || shareAdapter == address(0)) revert InvalidOApp();
+        _getRouteOrRevert(underlying);
 
         IERC20(underlying).safeTransferFrom(msg.sender, address(this), amount);
-        IERC20(underlying).forceApprove(wrapper, amount);
-
-        (uint256 net18, ) = IDStockWrapperLike(wrapper).wrap(underlying, amount, address(this));
-        amountSentLD = net18;
-        if (amountSentLD == 0) revert AmountZero();
-
-        IERC20(wrapper).forceApprove(shareAdapter, amountSentLD);
-
-        IOFTLike.SendParam memory sp = IOFTLike.SendParam({
+        UserWrapBridgeParams memory p = UserWrapBridgeParams({
             dstEid: dstEid,
             to: to,
-            amountLD: amountSentLD,
-            minAmountLD: 0, 
             extraOptions: extraOptions,
+            minAmountLD: minAmountLD,
             composeMsg: "",
-            oftCmd: ""
+            availableFee: msg.value,
+            refundTo: msg.sender
         });
-
-        IOFTLike.MessagingFee memory fee = IOFTLike(shareAdapter).quoteSend(sp, false);
-        if (msg.value < fee.nativeFee) revert InsufficientFee(msg.value, fee.nativeFee);
-
-        uint256 balBefore = IERC20(wrapper).balanceOf(address(this));
-        IOFTLike(shareAdapter).send{value: fee.nativeFee}(sp, fee, msg.sender);
-        uint256 balAfter = IERC20(wrapper).balanceOf(address(this));
-        _revokeApproval(wrapper, shareAdapter);
-
-        // Use balance delta (actual debited amount) for slippage checks to avoid trusting
-        // potentially inflated adapter-reported values for share-based / rebasing wrappers.
-        uint256 actualDebitedLD = balBefore > balAfter ? (balBefore - balAfter) : 0;
-        if (minAmountLD != 0 && actualDebitedLD < minAmountLD) revert InsufficientAmount(actualDebitedLD, minAmountLD);
-
-        uint256 refund = msg.value - fee.nativeFee;
-        if (refund > 0) {
-            (bool ok, ) = msg.sender.call{value: refund}("");
-            if (!ok) revert RefundFailedNative();
-        }
+        amountSentLD = _wrapAndBridgeUnderlying(underlying, amount, p);
     }
 
     /// @notice User entry: wrap underlying, then bridge shares to `composer` and trigger compose on destination.
@@ -356,46 +337,19 @@ contract DStockComposerRouter is
         if (amount == 0) revert AmountZero();
         if (composer == bytes32(0)) revert InvalidRecipient();
         if (receiver == address(0)) revert InvalidReceiver();
-
-        address wrapper = underlyingToWrapper[underlying];
-        address shareAdapter = underlyingToShareAdapter[underlying];
-        if (wrapper == address(0) || shareAdapter == address(0)) revert InvalidOApp();
+        _getRouteOrRevert(underlying);
 
         IERC20(underlying).safeTransferFrom(msg.sender, address(this), amount);
-        IERC20(underlying).forceApprove(wrapper, amount);
-
-        (uint256 net18, ) = IDStockWrapperLike(wrapper).wrap(underlying, amount, address(this));
-        amountSentLD = net18;
-        if (amountSentLD == 0) revert AmountZero();
-
-        IERC20(wrapper).forceApprove(shareAdapter, amountSentLD);
-
-        IOFTLike.SendParam memory sp = IOFTLike.SendParam({
+        UserWrapBridgeParams memory p = UserWrapBridgeParams({
             dstEid: dstEid,
             to: composer,
-            amountLD: amountSentLD,
-            minAmountLD: 0,
             extraOptions: extraOptions,
+            minAmountLD: minAmountLD,
             composeMsg: _encodeHyperCoreComposeMsg(minMsgValue, receiver),
-            oftCmd: ""
+            availableFee: msg.value,
+            refundTo: msg.sender
         });
-
-        IOFTLike.MessagingFee memory fee = IOFTLike(shareAdapter).quoteSend(sp, false);
-        if (msg.value < fee.nativeFee) revert InsufficientFee(msg.value, fee.nativeFee);
-
-        uint256 balBefore = IERC20(wrapper).balanceOf(address(this));
-        IOFTLike(shareAdapter).send{value: fee.nativeFee}(sp, fee, msg.sender);
-        uint256 balAfter = IERC20(wrapper).balanceOf(address(this));
-        _revokeApproval(wrapper, shareAdapter);
-
-        uint256 actualDebitedLD = balBefore > balAfter ? (balBefore - balAfter) : 0;
-        if (minAmountLD != 0 && actualDebitedLD < minAmountLD) revert InsufficientAmount(actualDebitedLD, minAmountLD);
-
-        uint256 refund = msg.value - fee.nativeFee;
-        if (refund > 0) {
-            (bool ok, ) = msg.sender.call{value: refund}("");
-            if (!ok) revert RefundFailedNative();
-        }
+        amountSentLD = _wrapAndBridgeUnderlying(underlying, amount, p);
     }
 
     /// @notice User entry: wrap native gas token (BNB/ETH) into `wrappedNative` (WBNB/WETH), then wrap into shares and bridge.
@@ -410,52 +364,15 @@ contract DStockComposerRouter is
         if (amountNative == 0) revert AmountZero();
         if (to == bytes32(0)) revert InvalidRecipient();
 
-        address w = wrappedNative;
-        if (w == address(0)) revert WrappedNativeNotSet();
-        if (msg.value < amountNative) revert InsufficientFee(msg.value, amountNative);
-
-        // 1) Wrap native into ERC20 on this router.
-        IWrappedNative(w).deposit{value: amountNative}();
-
-        // 2) Reuse the same wrap + bridge pipeline, using `w` as the underlying token.
-        address wrapper = underlyingToWrapper[w];
-        address shareAdapter = underlyingToShareAdapter[w];
-        if (wrapper == address(0) || shareAdapter == address(0)) revert InvalidOApp();
-
-        IERC20(w).forceApprove(wrapper, amountNative);
-        (uint256 net18, ) = IDStockWrapperLike(wrapper).wrap(w, amountNative, address(this));
-        amountSentLD = net18;
-        if (amountSentLD == 0) revert AmountZero();
-
-        IERC20(wrapper).forceApprove(shareAdapter, amountSentLD);
-
-        IOFTLike.SendParam memory sp = IOFTLike.SendParam({
-            dstEid: dstEid,
-            to: to,
-            amountLD: amountSentLD,
-            minAmountLD: 0, 
-            extraOptions: extraOptions,
-            composeMsg: "",
-            oftCmd: ""
-        });
-
-        IOFTLike.MessagingFee memory fee = IOFTLike(shareAdapter).quoteSend(sp, false);
-        uint256 availableFee = msg.value - amountNative;
-        if (availableFee < fee.nativeFee) revert InsufficientFee(availableFee, fee.nativeFee);
-
-        uint256 balBefore = IERC20(wrapper).balanceOf(address(this));
-        IOFTLike(shareAdapter).send{value: fee.nativeFee}(sp, fee, msg.sender);
-        uint256 balAfter = IERC20(wrapper).balanceOf(address(this));
-        _revokeApproval(wrapper, shareAdapter);
-
-        uint256 actualDebitedLD = balBefore > balAfter ? (balBefore - balAfter) : 0;
-        if (minAmountLD != 0 && actualDebitedLD < minAmountLD) revert InsufficientAmount(actualDebitedLD, minAmountLD);
-
-        uint256 refund = availableFee - fee.nativeFee;
-        if (refund > 0) {
-            (bool ok, ) = msg.sender.call{value: refund}("");
-            if (!ok) revert RefundFailedNative();
-        }
+        amountSentLD = _wrapAndBridgeNativeInternal(
+            amountNative,
+            dstEid,
+            to,
+            extraOptions,
+            minAmountLD,
+            "",
+            msg.sender
+        );
     }
 
     /// @notice User entry: wrap native to `wrappedNative`, wrap to shares, then bridge to `composer` with compose payload.
@@ -473,50 +390,15 @@ contract DStockComposerRouter is
         if (composer == bytes32(0)) revert InvalidRecipient();
         if (receiver == address(0)) revert InvalidReceiver();
 
-        address w = wrappedNative;
-        if (w == address(0)) revert WrappedNativeNotSet();
-        if (msg.value < amountNative) revert InsufficientFee(msg.value, amountNative);
-
-        IWrappedNative(w).deposit{value: amountNative}();
-
-        address wrapper = underlyingToWrapper[w];
-        address shareAdapter = underlyingToShareAdapter[w];
-        if (wrapper == address(0) || shareAdapter == address(0)) revert InvalidOApp();
-
-        IERC20(w).forceApprove(wrapper, amountNative);
-        (uint256 net18, ) = IDStockWrapperLike(wrapper).wrap(w, amountNative, address(this));
-        amountSentLD = net18;
-        if (amountSentLD == 0) revert AmountZero();
-
-        IERC20(wrapper).forceApprove(shareAdapter, amountSentLD);
-
-        IOFTLike.SendParam memory sp = IOFTLike.SendParam({
-            dstEid: dstEid,
-            to: composer,
-            amountLD: amountSentLD,
-            minAmountLD: 0,
-            extraOptions: extraOptions,
-            composeMsg: _encodeHyperCoreComposeMsg(minMsgValue, receiver),
-            oftCmd: ""
-        });
-
-        IOFTLike.MessagingFee memory fee = IOFTLike(shareAdapter).quoteSend(sp, false);
-        uint256 availableFee = msg.value - amountNative;
-        if (availableFee < fee.nativeFee) revert InsufficientFee(availableFee, fee.nativeFee);
-
-        uint256 balBefore = IERC20(wrapper).balanceOf(address(this));
-        IOFTLike(shareAdapter).send{value: fee.nativeFee}(sp, fee, msg.sender);
-        uint256 balAfter = IERC20(wrapper).balanceOf(address(this));
-        _revokeApproval(wrapper, shareAdapter);
-
-        uint256 actualDebitedLD = balBefore > balAfter ? (balBefore - balAfter) : 0;
-        if (minAmountLD != 0 && actualDebitedLD < minAmountLD) revert InsufficientAmount(actualDebitedLD, minAmountLD);
-
-        uint256 refund = availableFee - fee.nativeFee;
-        if (refund > 0) {
-            (bool ok, ) = msg.sender.call{value: refund}("");
-            if (!ok) revert RefundFailedNative();
-        }
+        amountSentLD = _wrapAndBridgeNativeInternal(
+            amountNative,
+            dstEid,
+            composer,
+            extraOptions,
+            minAmountLD,
+            _encodeHyperCoreComposeMsg(minMsgValue, receiver),
+            msg.sender
+        );
     }
 
     /// @notice Quote the LayerZero fee (native) for user wrap + bridge.
@@ -531,26 +413,7 @@ contract DStockComposerRouter is
     ) external view returns (uint256 nativeFee) {
         if (amount == 0) revert AmountZero();
         if (to == bytes32(0)) revert InvalidRecipient();
-
-        address wrapper = underlyingToWrapper[underlying];
-        address shareAdapter = underlyingToShareAdapter[underlying];
-        if (wrapper == address(0) || shareAdapter == address(0)) revert InvalidOApp();
-
-        (uint256 estimatedNet18, ) = IDStockWrapperPreview(wrapper).previewWrap(underlying, amount);
-        if (estimatedNet18 == 0) revert AmountZero();
-
-        IOFTLike.SendParam memory sp = IOFTLike.SendParam({
-            dstEid: dstEid,
-            to: to,
-            amountLD: estimatedNet18,
-            minAmountLD: 0, 
-            extraOptions: extraOptions,
-            composeMsg: "",
-            oftCmd: ""
-        });
-
-        IOFTLike.MessagingFee memory fee = IOFTLike(shareAdapter).quoteSend(sp, false);
-        return fee.nativeFee;
+        return _quoteWrapAndBridgeUnderlying(underlying, amount, dstEid, to, extraOptions, "");
     }
 
     /// @notice Quote LayerZero native fee for wrap + bridge to destination composer with compose payload.
@@ -566,26 +429,14 @@ contract DStockComposerRouter is
         if (amount == 0) revert AmountZero();
         if (composer == bytes32(0)) revert InvalidRecipient();
         if (receiver == address(0)) revert InvalidReceiver();
-
-        address wrapper = underlyingToWrapper[underlying];
-        address shareAdapter = underlyingToShareAdapter[underlying];
-        if (wrapper == address(0) || shareAdapter == address(0)) revert InvalidOApp();
-
-        (uint256 estimatedNet18, ) = IDStockWrapperPreview(wrapper).previewWrap(underlying, amount);
-        if (estimatedNet18 == 0) revert AmountZero();
-
-        IOFTLike.SendParam memory sp = IOFTLike.SendParam({
-            dstEid: dstEid,
-            to: composer,
-            amountLD: estimatedNet18,
-            minAmountLD: 0,
-            extraOptions: extraOptions,
-            composeMsg: _encodeHyperCoreComposeMsg(minMsgValue, receiver),
-            oftCmd: ""
-        });
-
-        IOFTLike.MessagingFee memory fee = IOFTLike(shareAdapter).quoteSend(sp, false);
-        return fee.nativeFee;
+        return _quoteWrapAndBridgeUnderlying(
+            underlying,
+            amount,
+            dstEid,
+            composer,
+            extraOptions,
+            _encodeHyperCoreComposeMsg(minMsgValue, receiver)
+        );
     }
 
     /// @notice Quote the LayerZero fee (native) for user wrap-native + bridge.
@@ -603,26 +454,7 @@ contract DStockComposerRouter is
         address w = wrappedNative;
         if (w == address(0)) revert WrappedNativeNotSet();
 
-        address wrapper = underlyingToWrapper[w];
-        address shareAdapter = underlyingToShareAdapter[w];
-        if (wrapper == address(0) || shareAdapter == address(0)) revert InvalidOApp();
-
-        // estimate shares minted by wrapping wrappedNative into wrapper shares
-        (uint256 estimatedNet18, ) = IDStockWrapperPreview(wrapper).previewWrap(w, amountNative);
-        if (estimatedNet18 == 0) revert AmountZero();
-
-        IOFTLike.SendParam memory sp = IOFTLike.SendParam({
-            dstEid: dstEid,
-            to: to,
-            amountLD: estimatedNet18,
-            minAmountLD: 0, 
-            extraOptions: extraOptions,
-            composeMsg: "",
-            oftCmd: ""
-        });
-
-        IOFTLike.MessagingFee memory fee = IOFTLike(shareAdapter).quoteSend(sp, false);
-        return fee.nativeFee;
+        return _quoteWrapAndBridgeUnderlying(w, amountNative, dstEid, to, extraOptions, "");
     }
 
     /// @notice Quote LayerZero native fee for wrap-native + bridge to destination composer with compose payload.
@@ -641,25 +473,117 @@ contract DStockComposerRouter is
         address w = wrappedNative;
         if (w == address(0)) revert WrappedNativeNotSet();
 
-        address wrapper = underlyingToWrapper[w];
-        address shareAdapter = underlyingToShareAdapter[w];
-        if (wrapper == address(0) || shareAdapter == address(0)) revert InvalidOApp();
+        return _quoteWrapAndBridgeUnderlying(
+            w,
+            amountNative,
+            dstEid,
+            composer,
+            extraOptions,
+            _encodeHyperCoreComposeMsg(minMsgValue, receiver)
+        );
+    }
 
-        (uint256 estimatedNet18, ) = IDStockWrapperPreview(wrapper).previewWrap(w, amountNative);
+    function _wrapAndBridgeUnderlying(address underlying, uint256 amount, UserWrapBridgeParams memory p)
+        internal
+        returns (uint256 amountSentLD)
+    {
+        (address wrapper, address shareAdapter) = _getRouteOrRevert(underlying);
+
+        IERC20(underlying).forceApprove(wrapper, amount);
+        (uint256 net18, ) = IDStockWrapperLike(wrapper).wrap(underlying, amount, address(this));
+        amountSentLD = net18;
+        if (amountSentLD == 0) revert AmountZero();
+
+        IOFTLike.SendParam memory sp = IOFTLike.SendParam({
+            dstEid: p.dstEid,
+            to: p.to,
+            amountLD: amountSentLD,
+            minAmountLD: 0,
+            extraOptions: p.extraOptions,
+            composeMsg: p.composeMsg,
+            oftCmd: ""
+        });
+
+        IOFTLike.MessagingFee memory fee = IOFTLike(shareAdapter).quoteSend(sp, false);
+        if (p.availableFee < fee.nativeFee) revert InsufficientFee(p.availableFee, fee.nativeFee);
+
+        IERC20(wrapper).forceApprove(shareAdapter, amountSentLD);
+        uint256 balBefore = IERC20(wrapper).balanceOf(address(this));
+        IOFTLike(shareAdapter).send{value: fee.nativeFee}(sp, fee, p.refundTo);
+        uint256 balAfter = IERC20(wrapper).balanceOf(address(this));
+        _revokeApproval(wrapper, shareAdapter);
+
+        uint256 actualDebitedLD = balBefore > balAfter ? (balBefore - balAfter) : 0;
+        if (p.minAmountLD != 0 && actualDebitedLD < p.minAmountLD) {
+            revert InsufficientAmount(actualDebitedLD, p.minAmountLD);
+        }
+
+        uint256 refund = p.availableFee - fee.nativeFee;
+        if (refund > 0) {
+            (bool ok, ) = p.refundTo.call{value: refund}("");
+            if (!ok) revert RefundFailedNative();
+        }
+    }
+
+    function _wrapAndBridgeNativeInternal(
+        uint256 amountNative,
+        uint32 dstEid,
+        bytes32 to,
+        bytes calldata extraOptions,
+        uint256 minAmountLD,
+        bytes memory composeMsg,
+        address refundTo
+    ) internal returns (uint256 amountSentLD) {
+        address w = wrappedNative;
+        if (w == address(0)) revert WrappedNativeNotSet();
+        if (msg.value < amountNative) revert InsufficientFee(msg.value, amountNative);
+
+        IWrappedNative(w).deposit{value: amountNative}();
+
+        UserWrapBridgeParams memory p = UserWrapBridgeParams({
+            dstEid: dstEid,
+            to: to,
+            extraOptions: extraOptions,
+            minAmountLD: minAmountLD,
+            composeMsg: composeMsg,
+            availableFee: msg.value - amountNative,
+            refundTo: refundTo
+        });
+
+        amountSentLD = _wrapAndBridgeUnderlying(w, amountNative, p);
+    }
+
+    function _quoteWrapAndBridgeUnderlying(
+        address underlying,
+        uint256 amount,
+        uint32 dstEid,
+        bytes32 to,
+        bytes calldata extraOptions,
+        bytes memory composeMsg
+    ) internal view returns (uint256 nativeFee) {
+        (address wrapper, address shareAdapter) = _getRouteOrRevert(underlying);
+
+        (uint256 estimatedNet18, ) = IDStockWrapperPreview(wrapper).previewWrap(underlying, amount);
         if (estimatedNet18 == 0) revert AmountZero();
 
         IOFTLike.SendParam memory sp = IOFTLike.SendParam({
             dstEid: dstEid,
-            to: composer,
+            to: to,
             amountLD: estimatedNet18,
             minAmountLD: 0,
             extraOptions: extraOptions,
-            composeMsg: _encodeHyperCoreComposeMsg(minMsgValue, receiver),
+            composeMsg: composeMsg,
             oftCmd: ""
         });
 
         IOFTLike.MessagingFee memory fee = IOFTLike(shareAdapter).quoteSend(sp, false);
         return fee.nativeFee;
+    }
+
+    function _getRouteOrRevert(address underlying) internal view returns (address wrapper, address shareAdapter) {
+        wrapper = underlyingToWrapper[underlying];
+        shareAdapter = underlyingToShareAdapter[underlying];
+        if (wrapper == address(0) || shareAdapter == address(0)) revert InvalidOApp();
     }
 
     /// @notice LayerZero compose callback entrypoint.
