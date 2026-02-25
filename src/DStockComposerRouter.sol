@@ -314,7 +314,6 @@ contract DStockComposerRouterV2 is
     ) external payable nonReentrant returns (uint256 amountSentLD) {
         if (amount == 0) revert AmountZero();
         if (to == bytes32(0)) revert InvalidRecipient();
-        _getRouteOrRevert(underlying);
 
         IERC20(underlying).safeTransferFrom(msg.sender, address(this), amount);
         UserWrapBridgeParams memory p = UserWrapBridgeParams({
@@ -344,7 +343,6 @@ contract DStockComposerRouterV2 is
         if (amount == 0) revert AmountZero();
         if (composer == bytes32(0)) revert InvalidRecipient();
         if (receiver == address(0)) revert InvalidReceiver();
-        _getRouteOrRevert(underlying);
 
         IERC20(underlying).safeTransferFrom(msg.sender, address(this), amount);
         UserWrapBridgeParams memory p = UserWrapBridgeParams({
