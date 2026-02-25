@@ -4,9 +4,11 @@ pragma solidity ^0.8.26;
 import "forge-std/Script.sol";
 import "forge-std/console2.sol";
 
+import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+
 import {DStockHyperCoreComposer} from "../src/DStockHyperCoreComposer.sol";
 
-/// @notice Deploy DStockHyperCoreComposer on HyperEVM and configure BNB1 token.
+/// @notice Deploy DStockHyperCoreComposer (UUPS proxy) on HyperEVM and configure BNB1 token.
 /// @dev Run with --rpc-url <HYPEREVM_RPC> [--broadcast]
 ///
 /// Required env:
@@ -33,12 +35,17 @@ contract DeployHyperCoreComposer is Script {
 
         vm.startBroadcast(adminPk);
 
-        DStockHyperCoreComposer composer = new DStockHyperCoreComposer(endpoint, owner);
+        DStockHyperCoreComposer impl = new DStockHyperCoreComposer();
+        bytes memory initData = abi.encodeCall(DStockHyperCoreComposer.initialize, (endpoint, owner));
+        ERC1967Proxy proxy = new ERC1967Proxy(address(impl), initData);
+        DStockHyperCoreComposer composer = DStockHyperCoreComposer(payable(address(proxy)));
+
         composer.configureToken(bnb1Oft, bnb1Index, bnb1DecimalDiff);
 
         vm.stopBroadcast();
 
-        console2.log("DStockHyperCoreComposer:", address(composer));
+        console2.log("DStockHyperCoreComposer implementation:", address(impl));
+        console2.log("DStockHyperCoreComposer proxy:", address(composer));
         console2.log("Configured BNB1 OFT:", bnb1Oft);
         console2.log("BNB1 token index:", bnb1Index);
         console2.log("BNB1 decimal diff:", bnb1DecimalDiff);
