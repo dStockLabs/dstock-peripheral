@@ -1,10 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Initializable} from "@openzeppelin/contracts-upgradeable/proxy/utils/Initializable.sol";
+import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
+import {AccessControlUpgradeable} from "@openzeppelin/contracts-upgradeable/access/AccessControlUpgradeable.sol";
+import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
+
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /// @title DStockHyperCoreComposer
 /// @notice LayerZero compose receiver that bridges OFT tokens arriving on HyperEVM into HyperCore.
@@ -12,11 +15,11 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 /// Modelled after LayerZero's official `HyperLiquidComposer` (deployed for USDe at
 /// 0xfb67615bff54078322e758efbeb5db27fdf873d8) but adapted for the DStock ecosystem:
 ///
-///   • Supports **multiple OFT tokens** via an owner-managed registry instead of being
+///   • Supports **multiple OFT tokens** via an admin-managed registry instead of being
 ///     bound to a single OFT at construction time.
 ///   • Stores each token's `decimalDiff` (= EVM decimals − HyperCore weiDecimals) so that
 ///     the EVM→Core conversion is always correct regardless of the token.
-///   • Provides recovery helpers (retrieve from Core, recover from EVM) gated to the owner.
+///   • Provides recovery helpers (retrieve from Core, recover from EVM) gated to ADMIN_ROLE.
 ///
 /// ### Compose message format (64 bytes, matches LZ standard)
 /// ```
@@ -34,8 +37,17 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 ///       core-denominated amount from the composer to the receiver.
 /// 4. If any step fails the tokens are refunded to the receiver on HyperEVM (or stored for
 ///    cross-chain refund if the compose message itself cannot be decoded).
-contract DStockHyperCoreComposer is Ownable, ReentrancyGuard {
+contract DStockHyperCoreComposer is
+    Initializable,
+    UUPSUpgradeable,
+    AccessControlUpgradeable,
+    ReentrancyGuardUpgradeable
+{
     using SafeERC20 for IERC20;
+
+    /// @notice Admin role for privileged operations (token registry, asset recovery, upgrades).
+    /// @dev Self-administered: an ADMIN can grant/revoke ADMIN to/from others to rotate privileges.
+    bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
 
     // ──────────────────────────────────────────────────────────────
     //  HyperLiquid system addresses & constants
@@ -75,7 +87,8 @@ contract DStockHyperCoreComposer is Ownable, ReentrancyGuard {
     //  State
     // ──────────────────────────────────────────────────────────────
 
-    address public immutable ENDPOINT;
+    /// @notice LayerZero EndpointV2 address on HyperEVM.
+    address public endpoint;
 
     struct TokenConfig {
         uint64  coreIndexId;
@@ -97,6 +110,8 @@ contract DStockHyperCoreComposer is Ownable, ReentrancyGuard {
 
     mapping(bytes32 => FailedMessage) public failedMessages;
 
+    uint256[47] private __gap;
+
     // ──────────────────────────────────────────────────────────────
     //  Events
     // ──────────────────────────────────────────────────────────────
@@ -114,6 +129,7 @@ contract DStockHyperCoreComposer is Ownable, ReentrancyGuard {
     //  Errors
     // ──────────────────────────────────────────────────────────────
 
+    error ZeroAddress();
     error NotEndpoint();
     error TokenNotConfigured(address oft);
     error InvalidDecimalDiff(int8 diff);
@@ -126,12 +142,30 @@ contract DStockHyperCoreComposer is Ownable, ReentrancyGuard {
     error NativeTransferFailed(uint256 amount);
 
     // ──────────────────────────────────────────────────────────────
-    //  Constructor
+    //  Constructor / Initializer
     // ──────────────────────────────────────────────────────────────
 
-    constructor(address _endpoint, address _owner) Ownable(_owner) {
-        ENDPOINT = _endpoint;
+    /// @custom:oz-upgrades-unsafe-allow constructor
+    constructor() {
+        _disableInitializers();
     }
+
+    /// @notice UUPS initializer (called once via proxy).
+    /// @param _endpoint LayerZero EndpointV2 address on HyperEVM
+    /// @param _admin    Initial admin that can configure tokens and upgrade
+    function initialize(address _endpoint, address _admin) external initializer {
+        if (_endpoint == address(0) || _admin == address(0)) revert ZeroAddress();
+        __AccessControl_init();
+        __UUPSUpgradeable_init();
+        __ReentrancyGuard_init();
+
+        endpoint = _endpoint;
+
+        _setRoleAdmin(ADMIN_ROLE, ADMIN_ROLE);
+        _grantRole(ADMIN_ROLE, _admin);
+    }
+
+    function _authorizeUpgrade(address) internal override onlyRole(ADMIN_ROLE) {}
 
     // ──────────────────────────────────────────────────────────────
     //  Admin – token registry
@@ -141,7 +175,7 @@ contract DStockHyperCoreComposer is Ownable, ReentrancyGuard {
     /// @param _oft         OFT contract on HyperEVM (the `_from` parameter in `lzCompose`)
     /// @param _coreIndexId HyperCore spot token index (e.g. 414 for BNB1)
     /// @param _decimalDiff EVM decimals − HyperCore weiDecimals (e.g. 18 − 9 = 9 for BNB1)
-    function configureToken(address _oft, uint64 _coreIndexId, int8 _decimalDiff) external onlyOwner {
+    function configureToken(address _oft, uint64 _coreIndexId, int8 _decimalDiff) external onlyRole(ADMIN_ROLE) {
         if (_decimalDiff < MIN_DECIMAL_DIFF || _decimalDiff > MAX_DECIMAL_DIFF) {
             revert InvalidDecimalDiff(_decimalDiff);
         }
@@ -156,7 +190,7 @@ contract DStockHyperCoreComposer is Ownable, ReentrancyGuard {
     }
 
     /// @notice Disable an OFT token (compose calls will revert).
-    function removeToken(address _oft) external onlyOwner {
+    function removeToken(address _oft) external onlyRole(ADMIN_ROLE) {
         delete tokenConfigs[_oft];
         emit TokenRemoved(_oft);
     }
@@ -172,7 +206,7 @@ contract DStockHyperCoreComposer is Ownable, ReentrancyGuard {
         address /*_executor*/,
         bytes calldata /*_extraData*/
     ) external payable nonReentrant {
-        if (msg.sender != ENDPOINT) revert NotEndpoint();
+        if (msg.sender != endpoint) revert NotEndpoint();
 
         TokenConfig memory cfg = tokenConfigs[_from];
         if (!cfg.enabled) revert TokenNotConfigured(_from);
@@ -408,7 +442,7 @@ contract DStockHyperCoreComposer is Ownable, ReentrancyGuard {
 
     /// @notice Retry a failed compose by refunding the OFT tokens back to the source chain.
     /// @dev Caller must supply enough `msg.value` for the LayerZero return fee.
-    function refundToSrc(bytes32 _guid) external payable onlyOwner {
+    function refundToSrc(bytes32 _guid) external payable onlyRole(ADMIN_ROLE) {
         FailedMessage memory fm = failedMessages[_guid];
         if (fm.amountLD == 0) revert FailedMessageNotFound(_guid);
         delete failedMessages[_guid];
@@ -437,7 +471,7 @@ contract DStockHyperCoreComposer is Ownable, ReentrancyGuard {
 
     /// @notice Pull tokens from the composer's HyperCore account back to the asset bridge
     ///         (making them available as ERC-20 on HyperEVM).
-    function retrieveCoreTokens(address _oft, uint64 _coreAmount) external onlyOwner {
+    function retrieveCoreTokens(address _oft, uint64 _coreAmount) external onlyRole(ADMIN_ROLE) {
         TokenConfig memory cfg = tokenConfigs[_oft];
         if (!cfg.enabled) revert TokenNotConfigured(_oft);
 
@@ -453,7 +487,7 @@ contract DStockHyperCoreComposer is Ownable, ReentrancyGuard {
     }
 
     /// @notice Rescue ERC-20 tokens stuck on this contract (HyperEVM side).
-    function recoverERC20(address _token, address _to, uint256 _amount) external onlyOwner {
+    function recoverERC20(address _token, address _to, uint256 _amount) external onlyRole(ADMIN_ROLE) {
         uint256 bal = IERC20(_token).balanceOf(address(this));
         uint256 amt = _amount == 0 ? bal : _amount;
         if (amt > bal) amt = bal;
@@ -463,7 +497,7 @@ contract DStockHyperCoreComposer is Ownable, ReentrancyGuard {
     }
 
     /// @notice Rescue native gas token stuck on this contract.
-    function recoverNative(address _to, uint256 _amount) external onlyOwner {
+    function recoverNative(address _to, uint256 _amount) external onlyRole(ADMIN_ROLE) {
         uint256 bal = address(this).balance;
         uint256 amt = _amount == 0 ? bal : _amount;
         if (amt > bal) amt = bal;

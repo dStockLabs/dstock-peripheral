@@ -6,7 +6,7 @@ import "forge-std/Test.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-import {DStockComposerRouter, IOFTLike} from "../src/DStockComposerRouter.sol";
+import {DStockComposerRouterV2, IOFTLike} from "../src/DStockComposerRouter.sol";
 import {DStockHyperCoreComposer} from "../src/DStockHyperCoreComposer.sol";
 import {MockComposerWrapper} from "./mocks/MockComposerWrapper.sol";
 import {MockERC20} from "./mocks/MockERC20.sol";
@@ -76,8 +76,8 @@ contract DStockHyperCoreComposerE2ETest is Test {
     uint64 internal constant BNB1_TOKEN_INDEX = 414;
     int8 internal constant BNB1_DECIMAL_DIFF = 9;
 
-    DStockComposerRouter internal router;
-    DStockComposerRouter internal impl;
+    DStockComposerRouterV2 internal router;
+    DStockComposerRouterV2 internal impl;
     DStockHyperCoreComposer internal composer;
 
     MockERC20 internal underlying;
@@ -85,10 +85,10 @@ contract DStockHyperCoreComposerE2ETest is Test {
     CaptureOFTLikeAdapter internal adapter;
 
     function setUp() public {
-        impl = new DStockComposerRouter();
-        bytes memory initData = abi.encodeCall(DStockComposerRouter.initialize, (ENDPOINT, uint32(12345), address(this)));
+        impl = new DStockComposerRouterV2();
+        bytes memory initData = abi.encodeCall(DStockComposerRouterV2.initialize, (ENDPOINT, uint32(12345), address(this)));
         ERC1967Proxy proxy = new ERC1967Proxy(address(impl), initData);
-        router = DStockComposerRouter(payable(address(proxy)));
+        router = DStockComposerRouterV2(payable(address(proxy)));
 
         underlying = new MockERC20("Underlying", "UND", 6);
         shareToken = new MockComposerWrapper();
@@ -98,7 +98,11 @@ contract DStockHyperCoreComposerE2ETest is Test {
 
         router.setRouteConfig(address(underlying), address(shareToken), address(adapter));
 
-        composer = new DStockHyperCoreComposer(ENDPOINT, address(this));
+        DStockHyperCoreComposer composerImpl = new DStockHyperCoreComposer();
+        bytes memory composerInitData = abi.encodeCall(DStockHyperCoreComposer.initialize, (ENDPOINT, address(this)));
+        ERC1967Proxy composerProxy = new ERC1967Proxy(address(composerImpl), composerInitData);
+        composer = DStockHyperCoreComposer(payable(address(composerProxy)));
+
         composer.configureToken(address(shareToken), BNB1_TOKEN_INDEX, BNB1_DECIMAL_DIFF);
     }
 
