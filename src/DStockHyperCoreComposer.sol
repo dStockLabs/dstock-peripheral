@@ -223,6 +223,10 @@ contract DStockHyperCoreComposer is
         }
 
         (uint256 minMsgValue, address receiver) = abi.decode(composeMsg, (uint256, address));
+        if (receiver == address(0)) {
+            _storeFailedMessage(_guid, _from, _message, amountLD);
+            return;
+        }
         if (msg.value < minMsgValue) revert InsufficientMsgValue(msg.value, minMsgValue);
         uint256 minGas = msg.value > 0 ? MIN_GAS_WITH_VALUE : MIN_GAS;
         if (gasleft() < minGas) revert InsufficientGas(gasleft(), minGas);
