@@ -4,7 +4,7 @@ pragma solidity ^0.8.26;
 import "forge-std/Script.sol";
 import "forge-std/console2.sol";
 
-import {DStockComposerRouter} from "../src/DStockComposerRouter.sol";
+import {DStockComposerRouterV2 as DStockComposerRouter} from "../src/DStockComposerRouter.sol";
 
 /// @notice Mainnet experiment for direct BSC native -> HyperCore via router + composer.
 /// @dev Calls router.wrapAndBridgeNativeToComposer(...).
