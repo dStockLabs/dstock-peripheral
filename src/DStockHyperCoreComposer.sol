@@ -486,6 +486,19 @@ contract DStockHyperCoreComposer is
         emit Retrieved(cfg.coreIndexId, amt, cfg.assetBridge);
     }
 
+    /// @notice Pull native HYPE from the composer's HyperCore spot account back to the HYPE asset
+    ///         bridge, making it available as native ETH on HyperEVM (retrievable via recoverNative).
+    function retrieveCoreNative() external onlyRole(ADMIN_ROLE) {
+        uint64 coreIndex = block.chainid == HYPE_CHAIN_ID_MAINNET ? HYPE_CORE_INDEX_MAINNET : HYPE_CORE_INDEX_TESTNET;
+        uint64 bal = _spotBalance(address(this), coreIndex);
+        if (bal == 0) return;
+
+        bytes memory action = abi.encode(HYPE_ASSET_BRIDGE, coreIndex, bal);
+        bytes memory payload = abi.encodePacked(SPOT_SEND_HEADER, action);
+        ICoreWriter(CORE_WRITER).sendRawAction(payload);
+        emit Retrieved(coreIndex, bal, HYPE_ASSET_BRIDGE);
+    }
+
     /// @notice Rescue ERC-20 tokens stuck on this contract (HyperEVM side).
     function recoverERC20(address _token, address _to, uint256 _amount) external onlyRole(ADMIN_ROLE) {
         uint256 bal = IERC20(_token).balanceOf(address(this));
