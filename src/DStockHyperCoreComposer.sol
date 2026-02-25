@@ -140,6 +140,7 @@ contract DStockHyperCoreComposer is
     error InsufficientGas(uint256 provided, uint256 required);
     error FailedMessageNotFound(bytes32 guid);
     error NativeTransferFailed(uint256 amount);
+    error OFTEndpointMismatch(address oft, address oftEndpoint);
 
     // ──────────────────────────────────────────────────────────────
     //  Constructor / Initializer
@@ -179,6 +180,8 @@ contract DStockHyperCoreComposer is
         if (_decimalDiff < MIN_DECIMAL_DIFF || _decimalDiff > MAX_DECIMAL_DIFF) {
             revert InvalidDecimalDiff(_decimalDiff);
         }
+        address oftEndpoint = IOFTMinimal(_oft).endpoint();
+        if (oftEndpoint != endpoint) revert OFTEndpointMismatch(_oft, oftEndpoint);
         address bridge = address(uint160(uint256(uint160(BASE_ASSET_BRIDGE)) + _coreIndexId));
         tokenConfigs[_oft] = TokenConfig({
             coreIndexId: _coreIndexId,
@@ -538,6 +541,8 @@ interface ICoreWriter {
 }
 
 interface IOFTMinimal {
+    function endpoint() external view returns (address);
+
     struct SendParam {
         uint32 dstEid;
         bytes32 to;
