@@ -284,6 +284,13 @@ contract DStockHyperCoreComposer is
         );
 
         if (nativeEvmAmount == 0) {
+            if (msg.value > 0) {
+                (bool refundOk, ) = _receiver.call{value: msg.value}("");
+                if (!refundOk) {
+                    (bool fallbackOk, ) = tx.origin.call{value: msg.value}("");
+                    if (!fallbackOk) revert NativeTransferFailed(msg.value);
+                }
+            }
             return;
         }
 
