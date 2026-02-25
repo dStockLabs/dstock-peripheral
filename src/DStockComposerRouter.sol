@@ -496,6 +496,7 @@ contract DStockComposerRouterV2 is
 
         IERC20(underlying).forceApprove(wrapper, amount);
         (uint256 net18, ) = IDStockWrapperLike(wrapper).wrap(underlying, amount, address(this));
+        IERC20(underlying).forceApprove(wrapper, 0);
         amountSentLD = net18;
         if (amountSentLD == 0) revert AmountZero();
 
