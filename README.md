@@ -142,7 +142,9 @@ forge script script/DeployComposerRouterProxy.s.sol:DeployComposerRouterProxy \
   --broadcast \
   --verify
 ```
+```
 forge script script/DeployComposerRouterProxy.s.sol:DeployComposerRouterProxy --rpc-url https://bsc-rpc.publicnode.com --chain-id 56 --legacy --broadcast -vvvv
+```
 
 After deploying, you can register more routes by calling `setRouteConfig(underlying, wrapper, shareAdapter)` as owner.
 
