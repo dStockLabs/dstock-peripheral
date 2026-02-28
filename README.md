@@ -142,5 +142,125 @@ forge script script/DeployComposerRouterProxy.s.sol:DeployComposerRouterProxy \
   --broadcast \
   --verify
 ```
+forge script script/DeployComposerRouterProxy.s.sol:DeployComposerRouterProxy --rpc-url https://bsc-rpc.publicnode.com --chain-id 56 --legacy --broadcast -vvvv
 
 After deploying, you can register more routes by calling `setRouteConfig(underlying, wrapper, shareAdapter)` as owner.
+
+### Post-deploy: Apply / Verify Route Configs
+
+Two Node.js scripts are provided for managing routes after deployment. They require no npm dependencies and use `fetch` + `cast` from Foundry.
+
+#### `scripts/reapplyRouteConfig.js` — Apply missing routes
+
+Reads `ROUTE_CONFIGS` and calls `setRouteConfig` for each entry that is not yet correctly configured on-chain. Already-correct routes are skipped automatically.
+
+**Required env vars:**
+
+| Variable | Description |
+|---|---|
+| `RPC_URL` | JSON-RPC endpoint |
+| `ROUTER_ADDRESS` | Deployed router proxy address |
+| `ROUTE_CONFIGS` | JSON array of `[underlying, wrapper, shareAdapter]` tuples |
+| `PRIVATE_KEY` or `ADMIN_PK` | Admin signing key (`PRIVATE_KEY`: `0x`-prefixed hex; `ADMIN_PK`: integer as used by forge) |
+
+**Optional env vars:**
+
+| Variable | Description | Example |
+|---|---|---|
+| `GAS_PRICE` | Custom gas price (recommended for BSC) | `3gwei` |
+| `LEGACY_TX` | Force legacy transactions (recommended for BSC public RPCs) | `1` |
+| `DRY_RUN` | Print commands without sending transactions | `1` |
+
+**`ROUTE_CONFIGS` format** (array of 3-element arrays):
+
+```bash
+ROUTE_CONFIGS='[
+  ["0xUNDERLYING", "0xWRAPPER", "0xSHARE_ADAPTER"],
+  ["0x0000000000000000000000000000000000000000", "0xWRAPPER2", "0xSHARE_ADAPTER2"]
+]'
+```
+
+> Set `underlying` to the zero address (`0x000...0`) to register only the reverse mapping (`shareAdapter -> wrapper`), without a forward mapping.
+
+**Usage:**
+
+```bash
+# Load env vars
+set -a && source .env && set +a
+
+# Dry-run first (no transactions sent)
+DRY_RUN=1 node scripts/reapplyRouteConfig.js
+
+# Execute
+node scripts/reapplyRouteConfig.js
+```
+
+**Example output:**
+
+```
+[0] setRouteConfig(forward+reverse)
+  underlying=0x992879...
+  wrapper   =0x8ede6a...
+  adapter   =0xf351fa...
+  [check] shareAdapterToWrapper:    onchain=0x000...0  expected=0x8ede6a...  ❌
+  [check] underlyingToWrapper:      onchain=0x000...0  expected=0x8ede6a...  ❌
+  [check] underlyingToShareAdapter: onchain=0x000...0  expected=0xf351fa...  ❌
+  => not fully set, sending transaction...
+
+[1] setRouteConfig(forward+reverse)
+  ...
+  => already correctly configured on-chain, skipping.
+
+Done. sent=12 skipped=1
+```
+
+---
+
+#### `scripts/checkRouteConfig.js` — Verify on-chain route state
+
+Queries the router contract for all routes in `ROUTE_CONFIGS` and reports which are correctly set.
+
+**Required env vars:** `RPC_URL`, `ROUTER_ADDRESS`, `ROUTE_CONFIGS`
+
+**Optional env vars:** `WRAPPED_NATIVE_ADDRESS`, `WRAPPED_NATIVE_PAYOUT_HELPER_ADDRESS`
+
+```bash
+set -a && source .env && set +a
+node scripts/checkRouteConfig.js
+```
+
+**Example output:**
+
+```
+Router: 0x7597fd...
+wrappedNative: ✅ expected=0xbb4cdb... onchain=0xbb4cdb...
+
+Routes:
+- [0] ✅
+  underlying=0x992879...
+  ...
+- [1] ❌
+  underlying=0x8b8727...
+  check reverse (adapter->wrapper): onchain=0x000...  expected=0x208aad...
+  ...
+
+One or more route checks FAILED.
+```
+
+Exit code is `0` if all checks pass, `1` if any check fails — suitable for use in CI pipelines.
+
+---
+
+#### Recommended workflow
+
+```bash
+# 1. Deploy the router
+forge script script/DeployComposerRouterProxy.s.sol:DeployComposerRouterProxy \
+  --rpc-url $RPC_URL --broadcast --legacy -vvvv
+
+# 2. Apply all routes (skips already-set ones)
+node scripts/reapplyRouteConfig.js
+
+# 3. Verify
+node scripts/checkRouteConfig.js
+```

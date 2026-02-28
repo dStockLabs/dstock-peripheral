@@ -58,12 +58,15 @@ contract DeployComposerRouterProxy is Script {
 
         // Route configuration:
         if (bytes(routeConfigs).length > 0) {
-            // ROUTE_CONFIGS is a JSON array-of-arrays: address[3][]
+            // ROUTE_CONFIGS is a JSON array-of-arrays: address[][]
             // Each entry is: [underlying, wrapper, shareAdapter]
+            // NOTE: stdJson/parseRaw encodes inner arrays as dynamic address[] (with length prefix),
+            //       so we must decode as address[][] not address[3][].
             bytes memory raw = routeConfigs.parseRaw(".");
-            address[3][] memory routes = abi.decode(raw, (address[3][]));
+            address[][] memory routes = abi.decode(raw, (address[][]));
 
             for (uint256 i = 0; i < routes.length; i++) {
+                if (routes[i].length < 3) continue;
                 address underlying = routes[i][0];
                 address wrapper = routes[i][1];
                 address shareAdapter = routes[i][2];
